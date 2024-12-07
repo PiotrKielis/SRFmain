@@ -1,0 +1,85 @@
+from django.test import TestCase
+from django.contrib.auth.models import User
+from .models import Movie, Rating, FavoriteMovie, RecommendationFeedback, Genre, Keyword, CastMember, Director
+
+class MovieModelTest(TestCase):
+    def test_create_movie(self):
+        # Test tworzenia obiektu Movie z podstawowymi polami i sprawdzanie ich wartości.
+        movie = Movie.objects.create(title="Test Movie", release_year=2020, description="Desc", poster_url="http://example.com")
+        self.assertEqual(movie.title, "Test Movie")
+        self.assertEqual(movie.release_year, 2020)
+        self.assertEqual(movie.description, "Desc")
+        self.assertEqual(movie.poster_url, "http://example.com")
+        self.assertEqual(str(movie), "Test Movie")
+
+    def test_movie_with_relations(self):
+        # Test dodawania powiązanych obiektów (genre, keyword, cast_member, director) do filmu
+        # oraz sprawdzanie, czy zostały prawidłowo przypisane przez ManyToMany.
+        genre = Genre.objects.create(name="Action")
+        keyword = Keyword.objects.create(name="Robot")
+        cast_member = CastMember.objects.create(name="Actor One")
+        director = Director.objects.create(name="Director One")
+
+        movie = Movie.objects.create(title="Complex Movie", release_year=2021)
+        movie.genres.add(genre)
+        movie.keywords.add(keyword)
+        movie.cast.add(cast_member)
+        movie.directors.add(director)
+
+        self.assertIn(genre, movie.genres.all())
+        self.assertIn(keyword, movie.keywords.all())
+        self.assertIn(cast_member, movie.cast.all())
+        self.assertIn(director, movie.directors.all())
+
+
+class RatingModelTest(TestCase):
+    def setUp(self):
+        # Przygotowanie środowiska: tworzenie użytkownika i filmu, aby później dodać do nich ocenę.
+        self.user = User.objects.create_user(username='testuser', password='pass')
+        self.movie = Movie.objects.create(title="Rated Movie", release_year=2010)
+
+    def test_create_rating(self):
+        # Test tworzenia oceny (Rating) powiązanej z utworzonym wcześniej filmem i użytkownikiem.
+        rating = Rating.objects.create(score=8, comment="Good!", movie=self.movie, user=self.user)
+        self.assertEqual(rating.score, 8)
+        self.assertEqual(rating.comment, "Good!")
+        self.assertEqual(rating.movie, self.movie)
+        self.assertEqual(rating.user, self.user)
+        # Sprawdzenie, czy metoda __str__ zwraca odpowiedni string.
+        self.assertEqual(str(rating), f"{self.user.username} - {self.movie.title} ({rating.score})")
+
+
+class FavoriteMovieModelTest(TestCase):
+    def setUp(self):
+        # Przygotowanie środowiska: tworzenie użytkownika i filmu, aby dodać film do ulubionych.
+        self.user = User.objects.create_user(username='favuser', password='pass')
+        self.movie = Movie.objects.create(title="Favorite Movie", release_year=2005)
+
+    def test_create_favorite_movie(self):
+        # Test dodawania filmu do ulubionych (FavoriteMovie) i sprawdzenie powiązań.
+        fav = FavoriteMovie.objects.create(user=self.user, movie=self.movie)
+        self.assertEqual(fav.user, self.user)
+        self.assertEqual(fav.movie, self.movie)
+        # Sprawdzenie __str__
+        self.assertEqual(str(fav), f"{self.user.username} - {self.movie.title}")
+
+
+class RecommendationFeedbackModelTest(TestCase):
+    def setUp(self):
+        # Przygotowanie danych: tworzenie użytkownika i filmu do sprawdzenia opinii o rekomendacji.
+        self.user = User.objects.create_user(username='feeduser', password='pass')
+        self.movie = Movie.objects.create(title="Feedback Movie", release_year=1999)
+
+    def test_create_recommendation_feedback(self):
+        # Test tworzenia opinii (RecommendationFeedback) o rekomendacji filmowej.
+        # recommendation to lista zawierająca id filmów. Sprawdzamy poprawność powiązań i __str__.
+        feedback = RecommendationFeedback.objects.create(
+            user=self.user,
+            recommendation=[self.movie.id],
+            score=9
+        )
+        self.assertEqual(feedback.user, self.user)
+        self.assertEqual(feedback.recommendation, [self.movie.id])
+        self.assertEqual(feedback.score, 9)
+        user_info = self.user.username
+        self.assertEqual(str(feedback), f"{user_info} - Ocena rekomendacji: {feedback.score}")
