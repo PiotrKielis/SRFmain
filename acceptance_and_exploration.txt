@@ -1,0 +1,848 @@
+import os
+import django
+import tmdbsimple as tmdb
+from random import randint
+from django.db import transaction
+from django.utils import timezone
+import time  # Import do testów wydajnościowych
+
+from django.test import TestCase, Client
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
+from django.contrib.auth.models import User
+from django.urls import reverse
+from movies.models import Movie, Genre, Director, CastMember, Keyword, Rating, FavoriteMovie, RecommendationFeedback
+from django.db.models import Avg
+
+#####################################
+# Testy jednostkowe (modele, relacje, dodatkowe)
+#####################################
+
+class MovieModelTest(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        print("\n=== Rozpoczynam testy jednostkowe: MovieModelTest ===")
+
+    @classmethod
+    def tearDownClass(cls):
+        print("=== Zakończono testy jednostkowe: MovieModelTest ===\n")
+        super().tearDownClass()
+
+    def test_create_movie(self):
+        movie = Movie.objects.create(title="Test Movie", release_year=2020, description="Desc",
+                                     poster_url="http://example.com")
+        self.assertEqual(movie.title, "Test Movie")
+        self.assertEqual(movie.release_year, 2020)
+        self.assertEqual(movie.description, "Desc")
+        self.assertEqual(movie.poster_url, "http://example.com")
+        self.assertEqual(str(movie), "Test Movie")
+
+    def test_movie_with_relations(self):
+        genre = Genre.objects.create(name="Action")
+        keyword = Keyword.objects.create(name="Robot")
+        cast_member = CastMember.objects.create(name="Actor One")
+        director = Director.objects.create(name="Director One")
+
+        movie = Movie.objects.create(title="Complex Movie", release_year=2021)
+        movie.genres.add(genre)
+        movie.keywords.add(keyword)
+        movie.cast.add(cast_member)
+        movie.directors.add(director)
+
+        self.assertIn(genre, movie.genres.all())
+        self.assertIn(keyword, movie.keywords.all())
+        self.assertIn(cast_member, movie.cast.all())
+        self.assertIn(director, movie.directors.all())
+
+
+class RatingModelTest(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        print("\n=== Rozpoczynam testy jednostkowe: RatingModelTest ===")
+
+    @classmethod
+    def tearDownClass(cls):
+        print("=== Zakończono testy jednostkowe: RatingModelTest ===\n")
+        super().tearDownClass()
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='testuser', password='pass')
+        self.movie = Movie.objects.create(title="Rated Movie", release_year=2010)
+
+    def test_create_rating(self):
+        rating = Rating.objects.create(score=8, comment="Good!", movie=self.movie, user=self.user)
+        self.assertEqual(rating.score, 8)
+        self.assertEqual(rating.comment, "Good!")
+        self.assertEqual(rating.movie, self.movie)
+        self.assertEqual(rating.user, self.user)
+        self.assertEqual(str(rating), f"{self.user.username} - {self.movie.title} ({rating.score})")
+
+
+class FavoriteMovieModelTest(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        print("\n=== Rozpoczynam testy jednostkowe: FavoriteMovieModelTest ===")
+
+    @classmethod
+    def tearDownClass(cls):
+        print("=== Zakończono testy jednostkowe: FavoriteMovieModelTest ===\n")
+        super().tearDownClass()
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='favuser', password='pass')
+        self.movie = Movie.objects.create(title="Favorite Movie", release_year=2005)
+
+    def test_create_favorite_movie(self):
+        fav = FavoriteMovie.objects.create(user=self.user, movie=self.movie)
+        self.assertEqual(fav.user, self.user)
+        self.assertEqual(fav.movie, self.movie)
+        self.assertEqual(str(fav), f"{self.user.username} - {self.movie.title}")
+
+
+class RecommendationFeedbackModelTest(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        print("\n=== Rozpoczynam testy jednostkowe: RecommendationFeedbackModelTest ===")
+
+    @classmethod
+    def tearDownClass(cls):
+        print("=== Zakończono testy jednostkowe: RecommendationFeedbackModelTest ===\n")
+        super().tearDownClass()
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='feeduser', password='pass')
+        self.movie = Movie.objects.create(title="Feedback Movie", release_year=1999)
+
+    def test_create_recommendation_feedback(self):
+        feedback = RecommendationFeedback.objects.create(
+            user=self.user,
+            recommendation=[self.movie.id],
+            score=9
+        )
+        self.assertEqual(feedback.user, self.user)
+        self.assertEqual(feedback.recommendation, [self.movie.id])
+        self.assertEqual(feedback.score, 9)
+        user_info = self.user.username
+        self.assertEqual(str(feedback), f"{user_info} - Ocena rekomendacji: {feedback.score}")
+
+
+class AdditionalMovieTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        print("\n=== Rozpoczynam testy jednostkowe (dodatkowe): AdditionalMovieTests ===")
+
+    @classmethod
+    def tearDownClass(cls):
+        print("=== Zakończono testy jednostkowe (dodatkowe): AdditionalMovieTests ===\n")
+        super().tearDownClass()
+
+    def test_create_movie_without_optional_fields(self):
+        movie = Movie.objects.create(title="Minimal Movie", release_year=2022)
+        self.assertEqual(movie.title, "Minimal Movie")
+        self.assertEqual(movie.release_year, 2022)
+        self.assertIsNone(movie.description)
+        self.assertIsNone(movie.poster_url)
+
+    def test_empty_database_queries(self):
+        self.assertEqual(Movie.objects.count(), 0)
+        self.assertFalse(Movie.objects.filter(title="Nonexistent").exists())
+
+
+class AdditionalRatingTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        print("\n=== Rozpoczynam testy jednostkowe (dodatkowe): AdditionalRatingTests ===")
+
+    @classmethod
+    def tearDownClass(cls):
+        print("=== Zakończono testy jednostkowe (dodatkowe): AdditionalRatingTests ===\n")
+        super().tearDownClass()
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='ratuser', password='pass')
+        self.movie = Movie.objects.create(title="Rat Movie", release_year=2015)
+
+    def test_rating_without_comment(self):
+        rating = Rating.objects.create(score=5, movie=self.movie, user=self.user)
+        self.assertEqual(rating.score, 5)
+        self.assertEqual(rating.comment, "")
+
+    def test_multiple_ratings_for_one_movie(self):
+        Rating.objects.create(score=7, movie=self.movie, user=self.user)
+        Rating.objects.create(score=9, comment="Great!", movie=self.movie, user=self.user)
+        self.assertEqual(Rating.objects.filter(movie=self.movie).count(), 2)
+
+
+class AdditionalFavoriteMovieTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        print("\n=== Rozpoczynam testy jednostkowe (dodatkowe): AdditionalFavoriteMovieTests ===")
+
+    @classmethod
+    def tearDownClass(cls):
+        print("=== Zakończono testy jednostkowe (dodatkowe): AdditionalFavoriteMovieTests ===\n")
+        super().tearDownClass()
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='multiuser', password='pass')
+        self.movie1 = Movie.objects.create(title="Fav1", release_year=2000)
+        self.movie2 = Movie.objects.create(title="Fav2", release_year=2001)
+
+    def test_add_multiple_favorites(self):
+        FavoriteMovie.objects.create(user=self.user, movie=self.movie1)
+        FavoriteMovie.objects.create(user=self.user, movie=self.movie2)
+        fav_movies = FavoriteMovie.objects.filter(user=self.user)
+        self.assertEqual(fav_movies.count(), 2)
+        self.assertIn(self.movie1, [f.movie for f in fav_movies])
+        self.assertIn(self.movie2, [f.movie for f in fav_movies])
+
+
+class AdditionalRecommendationFeedbackTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        print("\n=== Rozpoczynam testy jednostkowe (dodatkowe): AdditionalRecommendationFeedbackTests ===")
+
+    @classmethod
+    def tearDownClass(cls):
+        print("=== Zakończono testy jednostkowe (dodatkowe): AdditionalRecommendationFeedbackTests ===\n")
+        super().tearDownClass()
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='recuser', password='pass')
+        self.movie1 = Movie.objects.create(title="Rec1", release_year=1995)
+        self.movie2 = Movie.objects.create(title="Rec2", release_year=1996)
+
+    def test_feedback_multiple_movies(self):
+        feedback = RecommendationFeedback.objects.create(
+            user=self.user,
+            recommendation=[self.movie1.id, self.movie2.id],
+            score=8
+        )
+        self.assertEqual(feedback.score, 8)
+        self.assertCountEqual(feedback.recommendation, [self.movie1.id, self.movie2.id])
+
+
+class AdditionalRelationsTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        print("\n=== Rozpoczynam testy jednostkowe (dodatkowe): AdditionalRelationsTests ===")
+
+    @classmethod
+    def tearDownClass(cls):
+        print("=== Zakończono testy jednostkowe (dodatkowe): AdditionalRelationsTests ===\n")
+        super().tearDownClass()
+
+    def test_add_multiple_directors_and_cast(self):
+        movie = Movie.objects.create(title="Complex Relations Movie", release_year=2020)
+        director1 = Director.objects.create(name="Director A")
+        director2 = Director.objects.create(name="Director B")
+        cast1 = CastMember.objects.create(name="Cast A")
+        cast2 = CastMember.objects.create(name="Cast B")
+        movie.directors.add(director1, director2)
+        movie.cast.add(cast1, cast2)
+
+        self.assertIn(director1, movie.directors.all())
+        self.assertIn(director2, movie.directors.all())
+        self.assertIn(cast1, movie.cast.all())
+        self.assertIn(cast2, movie.cast.all())
+
+    def test_add_multiple_genres_and_keywords(self):
+        movie = Movie.objects.create(title="Keywords Genre Movie", release_year=2018)
+        g1 = Genre.objects.create(name="Comedy")
+        g2 = Genre.objects.create(name="Drama")
+        k1 = Keyword.objects.create(name="Space")
+        k2 = Keyword.objects.create(name="Future")
+
+        movie.genres.add(g1, g2)
+        movie.keywords.add(k1, k2)
+
+        self.assertCountEqual(movie.genres.all(), [g1, g2])
+        self.assertCountEqual(movie.keywords.all(), [k1, k2])
+
+
+#####################################
+# Testy wydajnościowe
+#####################################
+
+class PerformanceTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        print("\n=== Rozpoczynam testy wydajnościowe: PerformanceTests ===")
+
+    @classmethod
+    def tearDownClass(cls):
+        print("=== Zakończono testy wydajnościowe: PerformanceTests ===\n")
+        super().tearDownClass()
+
+    def test_bulk_create_movies_performance(self):
+        start = time.time()
+        movies = [Movie(title=f"Movie {i}", release_year=2000 + i) for i in range(1000)]
+        Movie.objects.bulk_create(movies)
+        end = time.time()
+        duration = end - start
+        self.assertLess(duration, 2, "Bulk creation of 1000 movies took too long")
+        print(f"Test test_bulk_create_movies_performance completed in {duration:.4f} seconds")
+
+    def test_query_performance(self):
+        Movie.objects.bulk_create([Movie(title=f"Movie {i}", release_year=2000 + i) for i in range(1000)])
+
+        start = time.time()
+        count = Movie.objects.filter(release_year__gte=2000).count()
+        end = time.time()
+        duration = end - start
+        self.assertEqual(count, 1000)
+        self.assertLess(duration, 0.5, "Query execution took too long")
+        print(f"Test test_query_performance completed in {duration:.4f} seconds")
+
+    def test_minimize_sql_queries(self):
+        Movie.objects.bulk_create([Movie(title=f"Movie {i}", release_year=2000 + i) for i in range(100)])
+        start = time.time()
+        with CaptureQueriesContext(connection) as ctx:
+            list(Movie.objects.all())
+        end = time.time()
+        duration = end - start
+        self.assertLessEqual(len(ctx.captured_queries), 3,
+                             f"Too many queries to fetch movies ({len(ctx.captured_queries)} queries).")
+        print(f"Test test_minimize_sql_queries completed in {duration:.4f} seconds")
+
+
+class AdditionalPerformanceRatingTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        print("\n=== Rozpoczynam testy wydajnościowe (dodatkowe): AdditionalPerformanceRatingTests ===")
+
+    @classmethod
+    def tearDownClass(cls):
+        print("=== Zakończono testy wydajnościowe (dodatkowe): AdditionalPerformanceRatingTests ===\n")
+        super().tearDownClass()
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='perfuser', password='pass')
+        self.movies = [Movie(title=f"Movie {i}", release_year=2000 + i) for i in range(100)]
+        Movie.objects.bulk_create(self.movies)
+        self.movies = list(Movie.objects.order_by('title'))
+
+    def test_bulk_rating_creation_performance(self):
+        start = time.time()
+        ratings = [Rating(score=(i % 10) + 1, movie=self.movies[i], user=self.user) for i in range(100)]
+        Rating.objects.bulk_create(ratings)
+        end = time.time()
+        duration = end - start
+        self.assertLess(duration, 1, "Bulk creation of 100 ratings took too long")
+        print(f"Test test_bulk_rating_creation_performance completed in {duration:.4f} seconds")
+
+    def test_rating_query_efficiency(self):
+        Rating.objects.bulk_create(
+            [Rating(score=(i % 10) + 1, movie=self.movies[i], user=self.user) for i in range(100)])
+
+        start = time.time()
+        with CaptureQueriesContext(connection) as ctx:
+            avg_score = Rating.objects.all().aggregate(avg_score=Avg('score'))['avg_score']
+        end = time.time()
+        duration = end - start
+        self.assertLessEqual(len(ctx.captured_queries), 2, "Calculating average score took too many queries.")
+        self.assertIsNotNone(avg_score)
+        print(f"Test test_rating_query_efficiency completed in {duration:.4f} seconds")
+
+
+#####################################
+# Testy akceptacyjne (scenariuszowe)
+#####################################
+
+class AcceptanceTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        print("\n=== Rozpoczynam testy akceptacyjne: AcceptanceTests ===")
+
+    @classmethod
+    def tearDownClass(cls):
+        print("=== Zakończono testy akceptacyjne: AcceptanceTests ===\n")
+        super().tearDownClass()
+
+    def setUp(self):
+        self.movie1 = Movie.objects.create(title="Acceptance Test Movie 1", release_year=2010)
+        self.movie2 = Movie.objects.create(title="Acceptance Test Movie 2", release_year=2011)
+        self.client = Client()
+
+    def test_user_registration_login_and_rating_flow(self):
+        print("\n--- Rozpoczynam test akceptacyjny: rejestracja, logowanie i ocena filmu ---")
+
+        # Rejestracja
+        print("Próba rejestracji nowego użytkownika...")
+        register_url = reverse('register')
+        response = self.client.post(register_url, {
+            'username': 'acceptance_user',
+            'password1': 'StrongPass123',
+            'password2': 'StrongPass123',
+            'email': 'acceptance_user@example.com'
+        })
+        self.assertEqual(response.status_code, 302, "Rejestracja nie przekierowała po udanym zapisie.")
+        self.assertTrue(User.objects.filter(username='acceptance_user').exists(), "Użytkownik nie został utworzony.")
+        print("Rejestracja zakończona pomyślnie.")
+
+        # Logowanie
+        print("Próba logowania użytkownika 'acceptance_user'...")
+        login_url = reverse('login')
+        response = self.client.post(login_url, {
+            'username': 'acceptance_user',
+            'password': 'StrongPass123',
+        })
+        self.assertEqual(response.status_code, 302, "Logowanie nie przekierowało po udanym zalogowaniu.")
+        print("Logowanie zakończone pomyślnie.")
+
+        # Strona główna
+        print("Sprawdzanie, czy na stronie głównej wyświetla się lista filmów...")
+        home_url = reverse('home')
+        response = self.client.get(home_url)
+        self.assertEqual(response.status_code, 200, "Strona główna nie zwróciła kodu 200.")
+        self.assertContains(response, "Acceptance Test Movie 1",
+                            msg_prefix="Brak filmu 'Acceptance Test Movie 1' na stronie głównej.")
+        self.assertContains(response, "Acceptance Test Movie 2",
+                            msg_prefix="Brak filmu 'Acceptance Test Movie 2' na stronie głównej.")
+        print("Lista filmów jest widoczna na stronie głównej.")
+
+        # Szczegóły filmu
+        print(f"Próba wejścia na stronę szczegółową filmu o ID {self.movie1.id}...")
+        movie_detail_url = reverse('movie_detail', args=[self.movie1.id])
+        response = self.client.get(movie_detail_url)
+        self.assertEqual(response.status_code, 200, "Strona szczegółowa filmu nie zwróciła kodu 200.")
+        self.assertContains(response, "Acceptance Test Movie 1", msg_prefix="Brak tytułu filmu na stronie szczegółowej.")
+        print("Strona szczegółowa filmu jest dostępna i zawiera poprawne dane.")
+
+        # Dodanie oceny
+        print("Próba dodania oceny do filmu...")
+        add_rating_url = reverse('add_rating', args=[self.movie1.id])
+        response = self.client.post(add_rating_url, {
+            'score': 8,
+            'comment': 'Bardzo dobry film!'
+        })
+        self.assertEqual(response.status_code, 302, "Dodanie oceny nie spowodowało przekierowania.")
+        print("Ocena została dodana - nastąpiło przekierowanie.")
+
+        # Sprawdzenie oceny w bazie
+        print("Sprawdzanie, czy ocena została zapisana w bazie...")
+        self.assertTrue(Rating.objects.filter(movie=self.movie1, score=8, comment='Bardzo dobry film!').exists(),
+                        "Ocena nie została znaleziona w bazie danych.")
+        print("Ocena została poprawnie zapisana w bazie.")
+
+        print("--- Test akceptacyjny zakończony pomyślnie ---\n")
+
+
+#####################################
+# Testy eksploracyjne
+#####################################
+
+class ExploratoryTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        print("\n=== Rozpoczynam testy eksploracyjne: ExploratoryTests ===")
+
+    @classmethod
+    def tearDownClass(cls):
+        print("=== Zakończono testy eksploracyjne: ExploratoryTests ===\n")
+        super().tearDownClass()
+
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user(username='explorer', password='explorepass')
+        self.movie = Movie.objects.create(title="Exploration Movie", release_year=2020)
+
+    def test_access_nonexistent_movie_detail(self):
+        print("\n[Eksploracyjny] Próba wejścia na stronę nieistniejącego filmu...")
+        nonexistent_id = 99999
+        movie_detail_url = reverse('movie_detail', args=[nonexistent_id])
+        response = self.client.get(movie_detail_url)
+        self.assertEqual(response.status_code, 404, "Wejście na nieistniejący film nie zwróciło 404.")
+        print("[Eksploracyjny] Próba dostępu do nieistniejącego filmu zakończyła się oczekiwanym błędem 404.")
+
+    def test_login_with_wrong_credentials(self):
+        print("\n[Eksploracyjny] Próba logowania z niepoprawnymi danymi...")
+        login_url = reverse('login')
+        response = self.client.post(login_url, {
+            'username': 'nonexistent',
+            'password': 'wrongpassword',
+        })
+        self.assertEqual(response.status_code, 200,
+                         "Logowanie z niepoprawnymi danymi nie zwróciło statusu 200 (powinno wyświetlić błąd).")
+        self.assertContains(response, "Nieprawidłowa nazwa użytkownika lub hasło.",
+                            msg_prefix="Brak komunikatu o niepoprawnych danych logowania.")
+        print("[Eksploracyjny] Próba logowania z niepoprawnymi danymi wyświetla odpowiedni komunikat.")
+
+    def test_random_page_access(self):
+        print("\n[Eksploracyjny] Próba wejścia na losowy, nieistniejący endpoint...")
+        response = self.client.get("/random/endpoint/that/does/not/exist/")
+        self.assertEqual(response.status_code, 404, "Dostęp do losowego endpointu nie zwrócił 404.")
+        print("[Eksploracyjny] Losowy endpoint zwrócił oczekiwaną stronę błędu 404.")
+
+import os
+import django
+import tmdbsimple as tmdb
+from random import randint
+from django.db import transaction
+from django.utils import timezone
+import time  # Import do testów wydajnościowych
+
+from django.test import TestCase, Client
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
+from django.contrib.auth.models import User
+from django.urls import reverse
+from movies.models import Movie, Genre, Director, CastMember, Keyword, Rating, FavoriteMovie, RecommendationFeedback
+from django.db.models import Avg
+
+
+#####################################
+# Testy jednostkowe (modele, relacje, dodatkowe)
+#####################################
+
+class MovieModelTest(TestCase):
+    def test_create_movie(self):
+        movie = Movie.objects.create(title="Test Movie", release_year=2020, description="Desc",
+                                     poster_url="http://example.com")
+        self.assertEqual(movie.title, "Test Movie")
+        self.assertEqual(movie.release_year, 2020)
+        self.assertEqual(movie.description, "Desc")
+        self.assertEqual(movie.poster_url, "http://example.com")
+        self.assertEqual(str(movie), "Test Movie")
+
+    def test_movie_with_relations(self):
+        genre = Genre.objects.create(name="Action")
+        keyword = Keyword.objects.create(name="Robot")
+        cast_member = CastMember.objects.create(name="Actor One")
+        director = Director.objects.create(name="Director One")
+
+        movie = Movie.objects.create(title="Complex Movie", release_year=2021)
+        movie.genres.add(genre)
+        movie.keywords.add(keyword)
+        movie.cast.add(cast_member)
+        movie.directors.add(director)
+
+        self.assertIn(genre, movie.genres.all())
+        self.assertIn(keyword, movie.keywords.all())
+        self.assertIn(cast_member, movie.cast.all())
+        self.assertIn(director, movie.directors.all())
+
+
+class RatingModelTest(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='testuser', password='pass')
+        self.movie = Movie.objects.create(title="Rated Movie", release_year=2010)
+
+    def test_create_rating(self):
+        rating = Rating.objects.create(score=8, comment="Good!", movie=self.movie, user=self.user)
+        self.assertEqual(rating.score, 8)
+        self.assertEqual(rating.comment, "Good!")
+        self.assertEqual(rating.movie, self.movie)
+        self.assertEqual(rating.user, self.user)
+        self.assertEqual(str(rating), f"{self.user.username} - {self.movie.title} ({rating.score})")
+
+
+class FavoriteMovieModelTest(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='favuser', password='pass')
+        self.movie = Movie.objects.create(title="Favorite Movie", release_year=2005)
+
+    def test_create_favorite_movie(self):
+        fav = FavoriteMovie.objects.create(user=self.user, movie=self.movie)
+        self.assertEqual(fav.user, self.user)
+        self.assertEqual(fav.movie, self.movie)
+        self.assertEqual(str(fav), f"{self.user.username} - {self.movie.title}")
+
+
+class RecommendationFeedbackModelTest(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='feeduser', password='pass')
+        self.movie = Movie.objects.create(title="Feedback Movie", release_year=1999)
+
+    def test_create_recommendation_feedback(self):
+        feedback = RecommendationFeedback.objects.create(
+            user=self.user,
+            recommendation=[self.movie.id],
+            score=9
+        )
+        self.assertEqual(feedback.user, self.user)
+        self.assertEqual(feedback.recommendation, [self.movie.id])
+        self.assertEqual(feedback.score, 9)
+        user_info = self.user.username
+        self.assertEqual(str(feedback), f"{user_info} - Ocena rekomendacji: {feedback.score}")
+
+
+class AdditionalMovieTests(TestCase):
+    def test_create_movie_without_optional_fields(self):
+        movie = Movie.objects.create(title="Minimal Movie", release_year=2022)
+        self.assertEqual(movie.title, "Minimal Movie")
+        self.assertEqual(movie.release_year, 2022)
+        self.assertIsNone(movie.description)
+        self.assertIsNone(movie.poster_url)
+
+    def test_empty_database_queries(self):
+        self.assertEqual(Movie.objects.count(), 0)
+        self.assertFalse(Movie.objects.filter(title="Nonexistent").exists())
+
+
+class AdditionalRatingTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='ratuser', password='pass')
+        self.movie = Movie.objects.create(title="Rat Movie", release_year=2015)
+
+    def test_rating_without_comment(self):
+        rating = Rating.objects.create(score=5, movie=self.movie, user=self.user)
+        self.assertEqual(rating.score, 5)
+        self.assertEqual(rating.comment, "")
+
+    def test_multiple_ratings_for_one_movie(self):
+        Rating.objects.create(score=7, movie=self.movie, user=self.user)
+        Rating.objects.create(score=9, comment="Great!", movie=self.movie, user=self.user)
+        self.assertEqual(Rating.objects.filter(movie=self.movie).count(), 2)
+
+
+class AdditionalFavoriteMovieTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='multiuser', password='pass')
+        self.movie1 = Movie.objects.create(title="Fav1", release_year=2000)
+        self.movie2 = Movie.objects.create(title="Fav2", release_year=2001)
+
+    def test_add_multiple_favorites(self):
+        FavoriteMovie.objects.create(user=self.user, movie=self.movie1)
+        FavoriteMovie.objects.create(user=self.user, movie=self.movie2)
+        fav_movies = FavoriteMovie.objects.filter(user=self.user)
+        self.assertEqual(fav_movies.count(), 2)
+        self.assertIn(self.movie1, [f.movie for f in fav_movies])
+        self.assertIn(self.movie2, [f.movie for f in fav_movies])
+
+
+class AdditionalRecommendationFeedbackTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='recuser', password='pass')
+        self.movie1 = Movie.objects.create(title="Rec1", release_year=1995)
+        self.movie2 = Movie.objects.create(title="Rec2", release_year=1996)
+
+    def test_feedback_multiple_movies(self):
+        feedback = RecommendationFeedback.objects.create(
+            user=self.user,
+            recommendation=[self.movie1.id, self.movie2.id],
+            score=8
+        )
+        self.assertEqual(feedback.score, 8)
+        self.assertCountEqual(feedback.recommendation, [self.movie1.id, self.movie2.id])
+
+
+class AdditionalRelationsTests(TestCase):
+    def test_add_multiple_directors_and_cast(self):
+        movie = Movie.objects.create(title="Complex Relations Movie", release_year=2020)
+        director1 = Director.objects.create(name="Director A")
+        director2 = Director.objects.create(name="Director B")
+        cast1 = CastMember.objects.create(name="Cast A")
+        cast2 = CastMember.objects.create(name="Cast B")
+        movie.directors.add(director1, director2)
+        movie.cast.add(cast1, cast2)
+
+        self.assertIn(director1, movie.directors.all())
+        self.assertIn(director2, movie.directors.all())
+        self.assertIn(cast1, movie.cast.all())
+        self.assertIn(cast2, movie.cast.all())
+
+    def test_add_multiple_genres_and_keywords(self):
+        movie = Movie.objects.create(title="Keywords Genre Movie", release_year=2018)
+        g1 = Genre.objects.create(name="Comedy")
+        g2 = Genre.objects.create(name="Drama")
+        k1 = Keyword.objects.create(name="Space")
+        k2 = Keyword.objects.create(name="Future")
+
+        movie.genres.add(g1, g2)
+        movie.keywords.add(k1, k2)
+
+        self.assertCountEqual(movie.genres.all(), [g1, g2])
+        self.assertCountEqual(movie.keywords.all(), [k1, k2])
+
+
+#####################################
+# Testy wydajnościowe
+#####################################
+
+class PerformanceTests(TestCase):
+    def test_bulk_create_movies_performance(self):
+        start = time.time()
+        movies = [Movie(title=f"Movie {i}", release_year=2000 + i) for i in range(1000)]
+        Movie.objects.bulk_create(movies)
+        end = time.time()
+        duration = end - start
+        self.assertLess(duration, 2, "Bulk creation of 1000 movies took too long")
+        print(f"Test test_bulk_create_movies_performance completed in {duration:.4f} seconds")
+
+    def test_query_performance(self):
+        Movie.objects.bulk_create([Movie(title=f"Movie {i}", release_year=2000 + i) for i in range(1000)])
+
+        start = time.time()
+        count = Movie.objects.filter(release_year__gte=2000).count()
+        end = time.time()
+        duration = end - start
+        self.assertEqual(count, 1000)
+        self.assertLess(duration, 0.5, "Query execution took too long")
+        print(f"Test test_query_performance completed in {duration:.4f} seconds")
+
+    def test_minimize_sql_queries(self):
+        Movie.objects.bulk_create([Movie(title=f"Movie {i}", release_year=2000 + i) for i in range(100)])
+        start = time.time()
+        with CaptureQueriesContext(connection) as ctx:
+            list(Movie.objects.all())
+        end = time.time()
+        duration = end - start
+        self.assertLessEqual(len(ctx.captured_queries), 3,
+                             f"Too many queries to fetch movies ({len(ctx.captured_queries)} queries).")
+        print(f"Test test_minimize_sql_queries completed in {duration:.4f} seconds")
+
+
+class AdditionalPerformanceRatingTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='perfuser', password='pass')
+        self.movies = [Movie(title=f"Movie {i}", release_year=2000 + i) for i in range(100)]
+        Movie.objects.bulk_create(self.movies)
+        self.movies = list(Movie.objects.order_by('title'))
+
+    def test_bulk_rating_creation_performance(self):
+        start = time.time()
+        ratings = [Rating(score=(i % 10) + 1, movie=self.movies[i], user=self.user) for i in range(100)]
+        Rating.objects.bulk_create(ratings)
+        end = time.time()
+        duration = end - start
+        self.assertLess(duration, 1, "Bulk creation of 100 ratings took too long")
+        print(f"Test test_bulk_rating_creation_performance completed in {duration:.4f} seconds")
+
+    def test_rating_query_efficiency(self):
+        Rating.objects.bulk_create(
+            [Rating(score=(i % 10) + 1, movie=self.movies[i], user=self.user) for i in range(100)])
+
+        start = time.time()
+        with CaptureQueriesContext(connection) as ctx:
+            avg_score = Rating.objects.all().aggregate(avg_score=Avg('score'))['avg_score']
+        end = time.time()
+        duration = end - start
+        self.assertLessEqual(len(ctx.captured_queries), 2, "Calculating average score took too many queries.")
+        self.assertIsNotNone(avg_score)
+        print(f"Test test_rating_query_efficiency completed in {duration:.4f} seconds")
+
+
+#####################################
+# Testy akceptacyjne (scenariuszowe)
+#####################################
+
+class AcceptanceTests(TestCase):
+    def setUp(self):
+        self.movie1 = Movie.objects.create(title="Acceptance Test Movie 1", release_year=2010)
+        self.movie2 = Movie.objects.create(title="Acceptance Test Movie 2", release_year=2011)
+        self.client = Client()
+
+    def test_user_registration_login_and_rating_flow(self):
+        print("\n--- Rozpoczynam test akceptacyjny: rejestracja, logowanie i ocena filmu ---")
+
+        # Rejestracja
+        print("Próba rejestracji nowego użytkownika...")
+        register_url = reverse('register')
+        response = self.client.post(register_url, {
+            'username': 'acceptance_user',
+            'password1': 'StrongPass123',
+            'password2': 'StrongPass123',
+            'email': 'acceptance_user@example.com'
+        })
+        self.assertEqual(response.status_code, 302, "Rejestracja nie przekierowała po udanym zapisie.")
+        self.assertTrue(User.objects.filter(username='acceptance_user').exists(), "Użytkownik nie został utworzony.")
+        print("Rejestracja zakończona pomyślnie.")
+
+        # Logowanie
+        print("Próba logowania użytkownika 'acceptance_user'...")
+        login_url = reverse('login')
+        response = self.client.post(login_url, {
+            'username': 'acceptance_user',
+            'password': 'StrongPass123',
+        })
+        self.assertEqual(response.status_code, 302, "Logowanie nie przekierowało po udanym zalogowaniu.")
+        print("Logowanie zakończone pomyślnie.")
+
+        # Strona główna
+        print("Sprawdzanie, czy na stronie głównej wyświetla się lista filmów...")
+        home_url = reverse('home')
+        response = self.client.get(home_url)
+        self.assertEqual(response.status_code, 200, "Strona główna nie zwróciła kodu 200.")
+        self.assertContains(response, "Acceptance Test Movie 1",
+                            msg_prefix="Brak filmu 'Acceptance Test Movie 1' na stronie głównej.")
+        self.assertContains(response, "Acceptance Test Movie 2",
+                            msg_prefix="Brak filmu 'Acceptance Test Movie 2' na stronie głównej.")
+        print("Lista filmów jest widoczna na stronie głównej.")
+
+        # Szczegóły filmu
+        print(f"Próba wejścia na stronę szczegółową filmu o ID {self.movie1.id}...")
+        movie_detail_url = reverse('movie_detail', args=[self.movie1.id])
+        response = self.client.get(movie_detail_url)
+        self.assertEqual(response.status_code, 200, "Strona szczegółowa filmu nie zwróciła kodu 200.")
+        self.assertContains(response, "Acceptance Test Movie 1", msg_prefix="Brak tytułu filmu na stronie szczegółowej.")
+        print("Strona szczegółowa filmu jest dostępna i zawiera poprawne dane.")
+
+        # Dodanie oceny
+        print("Próba dodania oceny do filmu...")
+        add_rating_url = reverse('add_rating', args=[self.movie1.id])
+        response = self.client.post(add_rating_url, {
+            'score': 8,
+            'comment': 'Bardzo dobry film!'
+        })
+        self.assertEqual(response.status_code, 302, "Dodanie oceny nie spowodowało przekierowania.")
+        print("Ocena została dodana - nastąpiło przekierowanie.")
+
+        # Sprawdzenie oceny w bazie
+        print("Sprawdzanie, czy ocena została zapisana w bazie...")
+        self.assertTrue(Rating.objects.filter(movie=self.movie1, score=8, comment='Bardzo dobry film!').exists(),
+                        "Ocena nie została znaleziona w bazie danych.")
+        print("Ocena została poprawnie zapisana w bazie.")
+
+        print("--- Test akceptacyjny zakończony pomyślnie ---\n")
+
+
+#####################################
+# Testy eksploracyjne
+#####################################
+
+class ExploratoryTests(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user(username='explorer', password='explorepass')
+        self.movie = Movie.objects.create(title="Exploration Movie", release_year=2020)
+
+    def test_access_nonexistent_movie_detail(self):
+        print("\n[Eksploracyjny] Próba wejścia na stronę nieistniejącego filmu...")
+        nonexistent_id = 99999
+        movie_detail_url = reverse('movie_detail', args=[nonexistent_id])
+        response = self.client.get(movie_detail_url)
+        self.assertEqual(response.status_code, 404, "Wejście na nieistniejący film nie zwróciło 404.")
+        print("[Eksploracyjny] Próba dostępu do nieistniejącego filmu zakończyła się oczekiwanym błędem 404.")
+
+    def test_login_with_wrong_credentials(self):
+        print("\n[Eksploracyjny] Próba logowania z niepoprawnymi danymi...")
+        login_url = reverse('login')
+        response = self.client.post(login_url, {
+            'username': 'nonexistent',
+            'password': 'wrongpassword',
+        })
+        self.assertEqual(response.status_code, 200,
+                         "Logowanie z niepoprawnymi danymi nie zwróciło statusu 200 (powinno wyświetlić błąd).")
+        self.assertContains(response, "Nieprawidłowa nazwa użytkownika lub hasło.",
+                            msg_prefix="Brak komunikatu o niepoprawnych danych logowania.")
+        print("[Eksploracyjny] Próba logowania z niepoprawnymi danymi wyświetla odpowiedni komunikat.")
+
+    def test_random_page_access(self):
+        print("\n[Eksploracyjny] Próba wejścia na losowy, nieistniejący endpoint...")
+        response = self.client.get("/random/endpoint/that/does/not/exist/")
+        self.assertEqual(response.status_code, 404, "Dostęp do losowego endpointu nie zwrócił 404.")
+        print("[Eksploracyjny] Losowy endpoint zwrócił oczekiwaną stronę błędu 404.")
