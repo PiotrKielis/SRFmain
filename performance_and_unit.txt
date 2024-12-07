@@ -1,0 +1,350 @@
+import os
+import django
+import tmdbsimple as tmdb
+from random import randint
+from django.db import transaction
+from django.utils import timezone
+import time  # Import konieczny do pomiaru czasu w testach wydajnościowych
+
+from django.test import TestCase
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
+from django.contrib.auth.models import User
+from movies.models import Movie, Genre, Director, CastMember, Keyword, Rating, FavoriteMovie, RecommendationFeedback
+from django.db.models import Avg
+
+
+#####################################
+# Testy jednostkowe (modele, relacje, dodatkowe)
+#####################################
+
+class MovieModelTest(TestCase):
+    def test_create_movie(self):
+        movie = Movie.objects.create(title="Test Movie", release_year=2020, description="Desc",
+                                     poster_url="http://example.com")
+        self.assertEqual(movie.title, "Test Movie")
+        self.assertEqual(movie.release_year, 2020)
+        self.assertEqual(movie.description, "Desc")
+        self.assertEqual(movie.poster_url, "http://example.com")
+        self.assertEqual(str(movie), "Test Movie")
+
+    def test_movie_with_relations(self):
+        genre = Genre.objects.create(name="Action")
+        keyword = Keyword.objects.create(name="Robot")
+        cast_member = CastMember.objects.create(name="Actor One")
+        director = Director.objects.create(name="Director One")
+
+        movie = Movie.objects.create(title="Complex Movie", release_year=2021)
+        movie.genres.add(genre)
+        movie.keywords.add(keyword)
+        movie.cast.add(cast_member)
+        movie.directors.add(director)
+
+        self.assertIn(genre, movie.genres.all())
+        self.assertIn(keyword, movie.keywords.all())
+        self.assertIn(cast_member, movie.cast.all())
+        self.assertIn(director, movie.directors.all())
+
+
+class RatingModelTest(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='testuser', password='pass')
+        self.movie = Movie.objects.create(title="Rated Movie", release_year=2010)
+
+    def test_create_rating(self):
+        rating = Rating.objects.create(score=8, comment="Good!", movie=self.movie, user=self.user)
+        self.assertEqual(rating.score, 8)
+        self.assertEqual(rating.comment, "Good!")
+        self.assertEqual(rating.movie, self.movie)
+        self.assertEqual(rating.user, self.user)
+        self.assertEqual(str(rating), f"{self.user.username} - {self.movie.title} ({rating.score})")
+
+
+class FavoriteMovieModelTest(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='favuser', password='pass')
+        self.movie = Movie.objects.create(title="Favorite Movie", release_year=2005)
+
+    def test_create_favorite_movie(self):
+        fav = FavoriteMovie.objects.create(user=self.user, movie=self.movie)
+        self.assertEqual(fav.user, self.user)
+        self.assertEqual(fav.movie, self.movie)
+        self.assertEqual(str(fav), f"{self.user.username} - {self.movie.title}")
+
+
+class RecommendationFeedbackModelTest(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='feeduser', password='pass')
+        self.movie = Movie.objects.create(title="Feedback Movie", release_year=1999)
+
+    def test_create_recommendation_feedback(self):
+        feedback = RecommendationFeedback.objects.create(
+            user=self.user,
+            recommendation=[self.movie.id],
+            score=9
+        )
+        self.assertEqual(feedback.user, self.user)
+        self.assertEqual(feedback.recommendation, [self.movie.id])
+        self.assertEqual(feedback.score, 9)
+        user_info = self.user.username
+        self.assertEqual(str(feedback), f"{user_info} - Ocena rekomendacji: {feedback.score}")
+
+
+class AdditionalMovieTests(TestCase):
+    def test_create_movie_without_optional_fields(self):
+        movie = Movie.objects.create(title="Minimal Movie", release_year=2022)
+        self.assertEqual(movie.title, "Minimal Movie")
+        self.assertEqual(movie.release_year, 2022)
+        self.assertIsNone(movie.description)
+        self.assertIsNone(movie.poster_url)
+
+    def test_empty_database_queries(self):
+        self.assertEqual(Movie.objects.count(), 0)
+        self.assertFalse(Movie.objects.filter(title="Nonexistent").exists())
+
+
+class AdditionalRatingTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='ratuser', password='pass')
+        self.movie = Movie.objects.create(title="Rat Movie", release_year=2015)
+
+    def test_rating_without_comment(self):
+        rating = Rating.objects.create(score=5, movie=self.movie, user=self.user)
+        self.assertEqual(rating.score, 5)
+        self.assertEqual(rating.comment, "")
+
+    def test_multiple_ratings_for_one_movie(self):
+        Rating.objects.create(score=7, movie=self.movie, user=self.user)
+        Rating.objects.create(score=9, comment="Great!", movie=self.movie, user=self.user)
+        self.assertEqual(Rating.objects.filter(movie=self.movie).count(), 2)
+
+
+class AdditionalFavoriteMovieTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='multiuser', password='pass')
+        self.movie1 = Movie.objects.create(title="Fav1", release_year=2000)
+        self.movie2 = Movie.objects.create(title="Fav2", release_year=2001)
+
+    def test_add_multiple_favorites(self):
+        FavoriteMovie.objects.create(user=self.user, movie=self.movie1)
+        FavoriteMovie.objects.create(user=self.user, movie=self.movie2)
+        fav_movies = FavoriteMovie.objects.filter(user=self.user)
+        self.assertEqual(fav_movies.count(), 2)
+        self.assertIn(self.movie1, [f.movie for f in fav_movies])
+        self.assertIn(self.movie2, [f.movie for f in fav_movies])
+
+
+class AdditionalRecommendationFeedbackTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='recuser', password='pass')
+        self.movie1 = Movie.objects.create(title="Rec1", release_year=1995)
+        self.movie2 = Movie.objects.create(title="Rec2", release_year=1996)
+
+    def test_feedback_multiple_movies(self):
+        feedback = RecommendationFeedback.objects.create(
+            user=self.user,
+            recommendation=[self.movie1.id, self.movie2.id],
+            score=8
+        )
+        self.assertEqual(feedback.score, 8)
+        self.assertCountEqual(feedback.recommendation, [self.movie1.id, self.movie2.id])
+
+
+class AdditionalRelationsTests(TestCase):
+    def test_add_multiple_directors_and_cast(self):
+        movie = Movie.objects.create(title="Complex Relations Movie", release_year=2020)
+        director1 = Director.objects.create(name="Director A")
+        director2 = Director.objects.create(name="Director B")
+        cast1 = CastMember.objects.create(name="Cast A")
+        cast2 = CastMember.objects.create(name="Cast B")
+        movie.directors.add(director1, director2)
+        movie.cast.add(cast1, cast2)
+
+        self.assertIn(director1, movie.directors.all())
+        self.assertIn(director2, movie.directors.all())
+        self.assertIn(cast1, movie.cast.all())
+        self.assertIn(cast2, movie.cast.all())
+
+    def test_add_multiple_genres_and_keywords(self):
+        movie = Movie.objects.create(title="Keywords Genre Movie", release_year=2018)
+        g1 = Genre.objects.create(name="Comedy")
+        g2 = Genre.objects.create(name="Drama")
+        k1 = Keyword.objects.create(name="Space")
+        k2 = Keyword.objects.create(name="Future")
+
+        movie.genres.add(g1, g2)
+        movie.keywords.add(k1, k2)
+
+        self.assertCountEqual(movie.genres.all(), [g1, g2])
+        self.assertCountEqual(movie.keywords.all(), [k1, k2])
+
+
+#####################################
+# Testy wydajnościowe
+#####################################
+
+class PerformanceTests(TestCase):
+    def test_bulk_create_movies_performance(self):
+        start = time.time()
+        movies = [Movie(title=f"Movie {i}", release_year=2000 + i) for i in range(1000)]
+        Movie.objects.bulk_create(movies)
+        end = time.time()
+        duration = end - start
+        self.assertLess(duration, 2, "Bulk creation of 1000 movies took too long")
+        print(f"Test test_bulk_create_movies_performance completed in {duration:.4f} seconds")
+
+    def test_query_performance(self):
+        Movie.objects.bulk_create([Movie(title=f"Movie {i}", release_year=2000 + i) for i in range(1000)])
+
+        start = time.time()
+        count = Movie.objects.filter(release_year__gte=2000).count()
+        end = time.time()
+        duration = end - start
+        self.assertEqual(count, 1000)
+        self.assertLess(duration, 0.5, "Query execution took too long")
+        print(f"Test test_query_performance completed in {duration:.4f} seconds")
+
+    def test_minimize_sql_queries(self):
+        Movie.objects.bulk_create([Movie(title=f"Movie {i}", release_year=2000 + i) for i in range(100)])
+        start = time.time()
+        with CaptureQueriesContext(connection) as ctx:
+            list(Movie.objects.all())
+        end = time.time()
+        duration = end - start
+        self.assertLessEqual(len(ctx.captured_queries), 3,
+                             f"Too many queries to fetch movies ({len(ctx.captured_queries)} queries).")
+        print(f"Test test_minimize_sql_queries completed in {duration:.4f} seconds")
+
+
+class AdditionalPerformanceRatingTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='perfuser', password='pass')
+        self.movies = [Movie(title=f"Movie {i}", release_year=2000 + i) for i in range(100)]
+        Movie.objects.bulk_create(self.movies)
+        # Po bulk_create pobieramy aktualne obiekty z bazy, by miały id
+        self.movies = list(Movie.objects.order_by('title'))
+
+    def test_bulk_rating_creation_performance(self):
+        start = time.time()
+        ratings = [Rating(score=(i % 10) + 1, movie=self.movies[i], user=self.user) for i in range(100)]
+        Rating.objects.bulk_create(ratings)
+        end = time.time()
+        duration = end - start
+        self.assertLess(duration, 1, "Bulk creation of 100 ratings took too long")
+        print(f"Test test_bulk_rating_creation_performance completed in {duration:.4f} seconds")
+
+    def test_rating_query_efficiency(self):
+        Rating.objects.bulk_create(
+            [Rating(score=(i % 10) + 1, movie=self.movies[i], user=self.user) for i in range(100)])
+
+        start = time.time()
+        with CaptureQueriesContext(connection) as ctx:
+            avg_score = Rating.objects.all().aggregate(avg_score=Avg('score'))['avg_score']
+        end = time.time()
+        duration = end - start
+        self.assertLessEqual(len(ctx.captured_queries), 2, "Calculating average score took too many queries.")
+        self.assertIsNotNone(avg_score)
+        print(f"Test test_rating_query_efficiency completed in {duration:.4f} seconds")
+
+
+#####################################
+# Kod populacji danych (uruchamiany tylko przy bezpośrednim uruchomieniu)
+#####################################
+
+tmdb.API_KEY = '04756ff411b2385e80a1f086c0bb27ee'  # Podmień na własny klucz jeśli potrzebne
+
+
+def populate_users():
+    existing_users = User.objects.all().count()
+    if existing_users < 20:
+        for i in range(existing_users + 1, 21):
+            username = f'user{i}'
+            User.objects.create_user(username=username, password='password123')
+            print(f"Utworzono użytkownika: {username}")
+    else:
+        print("Użytkownicy już istnieją.")
+
+
+def populate_movies():
+    movie_ids = set()
+    total_movies_needed = 200
+
+    page = 1
+    while len(movie_ids) < total_movies_needed:
+        print(f"Pobieranie strony {page} popularnych filmów...")
+        popular = tmdb.Movies().popular(page=page)
+        for movie_data in popular['results']:
+            movie_ids.add(movie_data['id'])
+            if len(movie_ids) >= total_movies_needed:
+                break
+        page += 1
+        if page > 500:
+            break
+
+    for movie_id in movie_ids:
+        try:
+            with transaction.atomic():
+                movie = tmdb.Movies(movie_id)
+                movie_info = movie.info(language='en-US')
+                movie_credits = movie.credits()
+                movie_keywords = movie.keywords()
+
+                release_year = int(movie_info['release_date'][:4]) if movie_info.get('release_date') else None
+                if Movie.objects.filter(title=movie_info['title'], release_year=release_year).exists():
+                    continue
+
+                movie_obj = Movie.objects.create(
+                    title=movie_info['title'],
+                    release_year=release_year,
+                    description=movie_info.get('overview', ''),
+                    poster_url=f"https://image.tmdb.org/t/p/w500{movie_info['poster_path']}" if movie_info.get(
+                        'poster_path') else ''
+                )
+
+                for genre_data in movie_info['genres']:
+                    genre_obj, _ = Genre.objects.get_or_create(name=genre_data['name'])
+                    movie_obj.genres.add(genre_obj)
+
+                for crew_member in movie_credits['crew']:
+                    if crew_member['job'] == 'Director':
+                        director_obj, _ = Director.objects.get_or_create(name=crew_member['name'])
+                        movie_obj.directors.add(director_obj)
+
+                for cast_member in movie_credits['cast'][:5]:
+                    cast_obj, _ = CastMember.objects.get_or_create(name=cast_member['name'])
+                    movie_obj.cast.add(cast_obj)
+
+                for keyword_data in movie_keywords['keywords']:
+                    keyword_obj, _ = Keyword.objects.get_or_create(name=keyword_data['name'])
+                    movie_obj.keywords.add(keyword_obj)
+
+                movie_obj.save()
+                print(f"Dodano film: {movie_obj.title}")
+
+        except Exception as e:
+            print(f"Błąd przy dodawaniu filmu ID {movie_id}: {e}")
+
+
+def add_ratings():
+    users = User.objects.all()
+    movies = Movie.objects.all()
+
+    for user in users:
+        rated_movies = movies.order_by('?')[:randint(5, 15)]
+        for movie in rated_movies:
+            score = randint(1, 10)
+            Rating.objects.create(
+                user=user,
+                movie=movie,
+                score=score,
+                comment=''
+            )
+        print(f"User {user.username} rated movies.")
+
+
+if __name__ == '__main__':
+    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'MovieRecommender.settings')
+    django.setup()
+    populate_users()
+    populate_movies()
+    add_ratings()
